@@ -910,4 +910,7 @@ main() {
     info "═══════════════════════════════════════════════════════"
 }
 
-main "$@"
+# Allow an interrupted release to resume through these same phase functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
