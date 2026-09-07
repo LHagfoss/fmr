@@ -41,6 +41,14 @@ fn should_apply_loop_recovery(
     !completion_requested && (output_abort || has_evidence_recovery)
 }
 
+fn recovery_action_for_tools(attempts: u8, soft_recovery: bool) -> LoopRecoveryAction {
+    if soft_recovery {
+        LoopRecoveryAction::Recover
+    } else {
+        loop_recovery_action(attempts)
+    }
+}
+
 fn batch_invalidates_read_recovery(
     made_progress: bool,
     recovery: Option<&(loop_detect::ProgressReason, usize, String)>,
@@ -689,6 +697,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
             let mut cross_tool_inspection_cycle = None;
             let mut cross_turn_made_progress = false;
             let mut cross_turn_had_edits = false;
+            let mut cross_turn_only_inspection = true;
             let mut cross_turn_authoritative_progress = false;
             let mut cross_turn_target_files = Vec::new();
             let mut cross_turn_tool_count = 0;
@@ -748,6 +757,8 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
                     verification_command = verification::is_verification_command(command)
                         || loop_detect::is_stable_inspection_command(command);
                 }
+                cross_turn_only_inspection &= verification_command
+                    || call.is_some_and(|call| loop_detect::is_read_only(&call.name));
                 dbg_log!(
                     "Tool '{}' finished with result length: {} chars",
                     name,
@@ -1103,6 +1114,8 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
             }
 
             let output_abort = matches!(stagnation, loop_detect::LoopStatus::Abort(_));
+            let soft_recovery =
+                cross_turn_tool_count > 0 && cross_turn_only_inspection && !cross_turn_had_edits;
             if should_apply_loop_recovery(completed, output_abort, evidence_recovery.is_some()) {
                 let (reason, streak, action) = evidence_recovery.unwrap_or((
                     loop_detect::ProgressReason::NoNewInformation,
@@ -1132,7 +1145,16 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
                     },
                     |notice| format!("[Evidence-based recovery: {notice}]"),
                 );
-                match loop_recovery_action(ctx.recovery.loop_recovery_attempts) {
+                // Repetition of an inspection-only batch is advisory. It may
+                // reset detector state and ask for a different approach, but
+                // it must not consume the hard mutation-loop recovery budget
+                // or turn into a tools-disabled final response.
+                let recovery_action =
+                    recovery_action_for_tools(ctx.recovery.loop_recovery_attempts, soft_recovery);
+                if soft_recovery {
+                    ctx.recovery.loop_recovery_attempts = 0;
+                }
+                match recovery_action {
                     LoopRecoveryAction::Recover => {
                         ctx.recovery.loop_recovery_attempts += 1;
                         ctx.metrics.evidence_recoveries += 1;
@@ -1464,7 +1486,7 @@ mod tests {
     use super::{
         batch_invalidates_read_recovery, benign_shell_wrapper_failure,
         bounded_malformed_tool_history, content_bearing_inspection_status, incomplete_tool_result,
-        mutation_batch_guidance, should_apply_loop_recovery,
+        mutation_batch_guidance, recovery_action_for_tools, should_apply_loop_recovery,
     };
     use crate::network::events::ToolResultMetadata;
     use crate::tools::ToolCall;
@@ -1507,6 +1529,28 @@ mod tests {
         assert!(should_apply_loop_recovery(false, true, false));
         assert!(should_apply_loop_recovery(false, false, true));
         assert!(!should_apply_loop_recovery(false, false, false));
+    }
+
+    #[test]
+    fn repeated_read_only_inspection_cannot_force_final_or_disable_tools() {
+        assert_eq!(
+            recovery_action_for_tools(0, true),
+            super::LoopRecoveryAction::Recover
+        );
+        assert_eq!(
+            recovery_action_for_tools(3, true),
+            super::LoopRecoveryAction::Recover
+        );
+        assert_eq!(
+            recovery_action_for_tools(u8::MAX, true),
+            super::LoopRecoveryAction::Recover
+        );
+
+        // The hard mutation-loop policy remains unchanged.
+        assert_eq!(
+            recovery_action_for_tools(3, false),
+            super::LoopRecoveryAction::ForceFinal
+        );
     }
 
     #[test]
