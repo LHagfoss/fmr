@@ -3631,8 +3631,8 @@ async fn repeated_failed_read_preserves_structured_failure() {
     assert!(!repeated.metadata.success, "got: {}", repeated.content);
     assert!(repeated.metadata.replayed);
     assert!(
-        !repeated.content.contains(&first.content),
-        "replay unexpectedly repeated the original failure: {}",
+        repeated.content.contains(&first.content),
+        "replay did not include the cached failure body: {}",
         repeated.content
     );
     assert!(repeated.content.contains("Unchanged read replay"));
@@ -3658,17 +3658,14 @@ async fn repeated_truncated_read_preserves_structured_truncation() {
         "replay lost structured truncation: {}",
         repeated.content
     );
-    assert!(
-        !repeated.content.contains(&first.content),
-        "replay unexpectedly repeated the original truncated output"
-    );
+    assert!(repeated.content.contains(&first.content));
     assert!(repeated.content.contains("Unchanged read replay"));
     assert!(repeated.content.contains("[tool_result_incomplete:"));
     assert_eq!(repeated.metadata.completeness, first.metadata.completeness);
 }
 
 #[tokio::test]
-async fn repeated_unchanged_view_file_keeps_first_result_and_compacts_replay() {
+async fn repeated_small_view_file_replays_cached_body() {
     let state = Arc::new(Mutex::new(AppState::new()));
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("source.rs");
@@ -3693,12 +3690,8 @@ async fn repeated_unchanged_view_file_keeps_first_result_and_compacts_replay() {
     );
     assert!(repeated.metadata.success, "got: {}", repeated.content);
     assert!(repeated.metadata.replayed);
-    assert!(
-        repeated.content.len() < 1_000,
-        "replayed read was not compact: {} bytes",
-        repeated.content.len()
-    );
-    assert!(!repeated.content.contains("function_200"));
+    assert!(repeated.content.len() <= REPLAYABLE_READ_LIMIT);
+    assert!(repeated.content.contains("function_200"));
     assert!(repeated.content.contains("fingerprint="));
     assert!(repeated.content.contains("Lines 1 to 400"));
     assert!(repeated.content.contains("earlier result"));
@@ -3716,13 +3709,12 @@ async fn repeated_unchanged_view_file_keeps_first_result_and_compacts_replay() {
             .and_then(|inspection| inspection.returned_range.clone())
     );
 
-    // History stores the original body and the compact replay as separate
-    // durable results; request rendering must retain both without inflating
-    // the replay back into the original body.
+    // History stores the original body and the replay as separate durable
+    // results; request rendering must retain both.
     let first_history = tool_result_history_message(first.clone(), None);
     let repeated_history = tool_result_history_message(repeated.clone(), None);
     assert!(first_history.content.contains("function_200"));
-    assert!(!repeated_history.content.contains("function_200"));
+    assert!(repeated_history.content.contains("function_200"));
     assert!(
         repeated_history
             .tool_result
@@ -3756,7 +3748,7 @@ async fn repeated_over_limit_failed_read_preserves_structured_failure() {
 }
 
 #[tokio::test]
-async fn repeated_over_limit_truncated_read_preserves_metadata_and_recovery_artifact() {
+async fn repeated_large_view_file_replays_bounded_cached_body_and_artifact() {
     let state = Arc::new(Mutex::new(AppState::new()));
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("large.txt");
@@ -3793,6 +3785,7 @@ async fn repeated_over_limit_truncated_read_preserves_metadata_and_recovery_arti
     assert!(repeated.content.len() <= REPLAYABLE_READ_LIMIT);
     assert!(repeated.content.contains("Unchanged read replay"));
     assert!(repeated.content.contains(artifact));
+    assert!(repeated.content.contains("line 617:"));
     assert!(!repeated.content.contains(&first.content));
 }
 

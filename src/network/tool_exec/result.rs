@@ -1,5 +1,6 @@
 use crate::app::ChatMessage;
 
+use super::super::REPLAYABLE_READ_LIMIT;
 use super::super::events::{ToolResult, ToolResultMetadata};
 use super::super::is_mutating_tool;
 use super::super::output::{INCOMPLETE_TOOL_RESULT_MARKER, truncate_tool_output_for_message};
@@ -207,6 +208,37 @@ fn compact_reference_path(path: &str) -> String {
     bounded
 }
 
+/// Keep cached read content useful without allowing it to grow the prompt
+/// beyond the repeat cache budget. Preserve both ends because bounded tool
+/// output commonly puts the useful recovery notice at the end.
+pub(crate) fn bounded_replay_content(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+
+    const MARKER: &str = "\n\n... [cached read snippet bounded for replay] ...\n\n";
+    let content_budget = max_bytes.saturating_sub(MARKER.len());
+    let head_budget = content_budget * 3 / 5;
+    let tail_budget = content_budget.saturating_sub(head_budget);
+    let head_end = content.floor_char_boundary(head_budget);
+    let tail_start = content.len().saturating_sub(tail_budget);
+    let tail_start = content.ceil_char_boundary(tail_start);
+
+    format!(
+        "{}{}{}",
+        &content[..head_end],
+        MARKER,
+        &content[tail_start..]
+    )
+}
+
+/// Bound a replay after its metadata and recovery artifact note have been
+/// added. The original result remains canonical history; this is only the
+/// repeated-call payload.
+pub(crate) fn bound_replayed_read_result(content: &str) -> String {
+    bounded_replay_content(content, REPLAYABLE_READ_LIMIT)
+}
+
 /// Render the model-facing payload for an unchanged repeat without replaying
 /// the read body. The first result remains the source of truth in history;
 /// this payload only points back to it and gives the model an actionable way
@@ -252,6 +284,11 @@ pub(crate) fn compact_replayed_read_result(
     );
     reference
         .push_str("Request a different start_line/end_line range or use grep for new evidence.]");
+    if let Some(content) = previous_content {
+        let body_budget = REPLAYABLE_READ_LIMIT.saturating_sub(reference.len() + 1);
+        let body = bounded_replay_content(content, body_budget);
+        return format!("{reference}\n{body}");
+    }
     reference
 }
 

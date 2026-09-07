@@ -23,8 +23,9 @@ pub(crate) use preview::{
     tool_result_precludes_preview_fallback,
 };
 pub(crate) use result::{
-    bounded_tool_result_history_message, compact_replayed_read_result, finalize_tool_result,
-    subagent_tool_history_message, tool_result_from_execution, tool_result_history_message,
+    bound_replayed_read_result, bounded_replay_content, bounded_tool_result_history_message,
+    compact_replayed_read_result, finalize_tool_result, subagent_tool_history_message,
+    tool_result_from_execution, tool_result_history_message,
 };
 pub(crate) async fn ask_user_question(
     state: &Arc<Mutex<AppState>>,
@@ -727,6 +728,7 @@ pub(crate) async fn execute_tool_batch(
                                 " The bounded output remains available at: {path}."
                             ));
                         }
+                        content = bound_replayed_read_result(&content);
                         replay_artifact = previous.full_output_artifact;
                         (
                             crate::tools::ToolExecutionOutput {
@@ -814,8 +816,9 @@ pub(crate) async fn execute_tool_batch(
                     s.recent_read_outputs.insert(
                         sig.clone(),
                         crate::app::CachedReadOutput {
-                            replayable_content: (execution.content.len() <= REPLAYABLE_READ_LIMIT)
-                                .then(|| execution.content.clone()),
+                            replayable_content: (!execution.content.is_empty()).then(|| {
+                                bounded_replay_content(&execution.content, REPLAYABLE_READ_LIMIT)
+                            }),
                             success: execution.success,
                             exit_code: execution.exit_code,
                             truncated: execution.truncated,
@@ -910,6 +913,10 @@ pub(crate) async fn execute_tool_batch(
         if is_read_only_tool(&call.name) {
             let sig = tool_signature(&call.name, &call.arguments);
             if let Some(cached) = state.lock().await.recent_read_outputs.get_mut(&sig) {
+                if !result.metadata.replayed {
+                    cached.replayable_content = (!result.content.is_empty())
+                        .then(|| bounded_replay_content(&result.content, REPLAYABLE_READ_LIMIT));
+                }
                 cached.success = result.metadata.success;
                 cached.exit_code = result.metadata.exit_code;
                 cached.truncated = result.metadata.truncated;
