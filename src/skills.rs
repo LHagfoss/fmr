@@ -84,14 +84,56 @@ fn prompt_mentions_skill(prompt: &str, skill_name: &str) -> bool {
     false
 }
 
-pub fn skill_routing_hint(prompt: &str, skills: &[SkillMetadata]) -> Option<String> {
-    let skill = skills
-        .iter()
-        .find(|skill| prompt_mentions_skill(prompt, &skill.name))?;
+pub fn skill_routing_hint(
+    prompt: &str,
+    skills: &[SkillMetadata],
+    invoked_skills: &[String],
+) -> Option<String> {
+    let skill = skills.iter().find(|skill| {
+        prompt_mentions_skill(prompt, &skill.name)
+            && !invoked_skills
+                .iter()
+                .any(|loaded| loaded.eq_ignore_ascii_case(&skill.name))
+    })?;
     Some(format!(
         "# Priority skill route\nThe latest user prompt explicitly names available skill `{}`. Call `use_skill` first with the exact name `{}` before any filesystem, web, or exploration tool.",
         skill.name, skill.name
     ))
+}
+
+pub(crate) fn loaded_skills_since_latest_user(history: &[crate::app::ChatMessage]) -> Vec<String> {
+    history
+        .iter()
+        .rev()
+        .take_while(|message| message.role != "user")
+        .filter_map(|message| {
+            let result = message.tool_result.as_ref()?;
+            if result.tool_name != "use_skill" || !result.success {
+                return None;
+            }
+            let marker = "<skill_content name=\"";
+            let start = message.content.find(marker)? + marker.len();
+            let end = message.content[start..].find('"')? + start;
+            Some(message.content[start..end].to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn invoked_skills_since_latest_user(history: &[crate::app::ChatMessage]) -> Vec<String> {
+    history
+        .iter()
+        .rev()
+        .take_while(|message| message.role != "user")
+        .flat_map(|message| message.tool_calls.iter())
+        .filter(|call| call.name == "use_skill")
+        .filter_map(|call| serde_json::from_str::<serde_json::Value>(&call.arguments).ok())
+        .filter_map(|arguments| {
+            arguments
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn split_skill_dirs(value: &OsStr) -> Vec<PathBuf> {
@@ -376,7 +418,7 @@ mod tests {
             path: PathBuf::from("/skills/solidtime"),
         }];
 
-        let hint = skill_routing_hint("Please check Solidtime for this week.", &skills)
+        let hint = skill_routing_hint("Please check Solidtime for this week.", &skills, &[])
             .expect("explicitly named skill should route");
 
         assert!(hint.contains("use_skill"));
@@ -391,9 +433,11 @@ mod tests {
             path: PathBuf::from("/skills/solidtime"),
         }];
 
-        assert!(skill_routing_hint("Please inspect the time module.", &skills).is_none());
-        assert!(skill_routing_hint("Please inspect solidtimes.", &skills).is_none());
-        assert!(skill_routing_hint("Please inspect solidtime-like behavior.", &skills).is_none());
+        assert!(skill_routing_hint("Please inspect the time module.", &skills, &[]).is_none());
+        assert!(skill_routing_hint("Please inspect solidtimes.", &skills, &[]).is_none());
+        assert!(
+            skill_routing_hint("Please inspect solidtime-like behavior.", &skills, &[]).is_none()
+        );
     }
 
     #[test]
@@ -404,7 +448,7 @@ mod tests {
             path: PathBuf::from("/skills/release-automation"),
         }];
 
-        assert!(skill_routing_hint("Clean this up and release it.", &skills).is_none());
+        assert!(skill_routing_hint("Clean this up and release it.", &skills, &[]).is_none());
     }
 
     #[test]
@@ -416,10 +460,76 @@ mod tests {
         }];
 
         assert!(
-            skill_routing_hint("Build a Bun API that stores email addresses.", &skills).is_none()
+            skill_routing_hint("Build a Bun API that stores email addresses.", &skills, &[])
+                .is_none()
         );
         assert!(
-            skill_routing_hint("Use cloudflare-email-service for delivery.", &skills).is_some()
+            skill_routing_hint("Use cloudflare-email-service for delivery.", &skills, &[])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn skill_routing_hint_skips_a_skill_already_loaded_this_turn() {
+        let skills = [SkillMetadata {
+            name: "solidtime".to_string(),
+            description: "Solidtime workflow".to_string(),
+            path: PathBuf::from("/skills/solidtime"),
+        }];
+
+        assert!(
+            skill_routing_hint(
+                "Please check Solidtime for this week.",
+                &skills,
+                &["solidtime".to_string()],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn loaded_skills_only_include_successful_results_after_latest_user() {
+        let loaded = |name: &str, success: bool| {
+            let record = crate::app::ToolResultRecord {
+                tool_name: "use_skill".to_string(),
+                success,
+                ..Default::default()
+            };
+            crate::app::ChatMessage::new(
+                "tool",
+                format!("use_skill: <skill_content name=\"{name}\">\ninstructions"),
+            )
+            .with_tool_result(record)
+        };
+        let history = vec![
+            crate::app::ChatMessage::new("user", "old request"),
+            loaded("old-skill", true),
+            crate::app::ChatMessage::new("user", "use solidtime"),
+            loaded("missing-skill", false),
+            loaded("solidtime", true),
+        ];
+
+        assert_eq!(
+            loaded_skills_since_latest_user(&history),
+            vec!["solidtime".to_string()]
+        );
+    }
+
+    #[test]
+    fn invoked_skills_include_calls_even_when_loading_failed() {
+        let call = crate::app::ToolCallRef {
+            id: "call-1".to_string(),
+            name: "use_skill".to_string(),
+            arguments: r#"{"name":"solidtime"}"#.to_string(),
+        };
+        let history = vec![
+            crate::app::ChatMessage::new("user", "use solidtime"),
+            crate::app::ChatMessage::new("assistant", "").with_tool_calls(vec![call]),
+        ];
+
+        assert_eq!(
+            invoked_skills_since_latest_user(&history),
+            vec!["solidtime".to_string()]
         );
     }
 }
