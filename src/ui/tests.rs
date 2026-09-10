@@ -914,6 +914,49 @@ fn use_skill_renders_in_committed_history() {
 }
 
 #[test]
+fn incremental_tool_round_continuation_has_no_second_group_heading() {
+    use crate::app::{ChatMessage, ToolCallRef, ToolResultRecord};
+
+    let mut state = AppState::new();
+    state.history.extend([
+        ChatMessage::new("assistant", "").with_tool_calls(vec![ToolCallRef {
+            id: "call-1".to_owned(),
+            name: "view_file".to_owned(),
+            arguments: r#"{"TargetFile":"index.html"}"#.to_owned(),
+        }]),
+        ChatMessage::new("tool", "view_file: first read")
+            .answering(Some("call-1".to_owned()))
+            .with_tool_result(ToolResultRecord {
+                tool_name: "view_file".to_owned(),
+                success: true,
+                ..Default::default()
+            }),
+        ChatMessage::new("assistant", "").with_tool_calls(vec![ToolCallRef {
+            id: "call-2".to_owned(),
+            name: "view_file".to_owned(),
+            arguments: r#"{"TargetFile":"js/app.js"}"#.to_owned(),
+        }]),
+        ChatMessage::new("tool", "view_file: second read")
+            .answering(Some("call-2".to_owned()))
+            .with_tool_result(ToolResultRecord {
+                tool_name: "view_file".to_owned(),
+                success: true,
+                ..Default::default()
+            }),
+    ]);
+
+    let snapshot = state.render_snapshot();
+    let continuation =
+        super::render_committed_tool_result_continuation_snapshot(&snapshot, &[3], 80, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+    assert!(continuation.iter().any(|line| line.contains("Read")));
+    assert!(!continuation.iter().any(|line| line.contains("Explored")));
+}
+
+#[test]
 fn high_verbosity_keeps_tool_call_summaries_visible() {
     use crate::app::{ChatMessage, ToolCallRef, ToolResultRecord, Verbosity};
 
