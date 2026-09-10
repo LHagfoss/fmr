@@ -593,6 +593,35 @@ pub(crate) async fn execute_tool_batch(
             .collect::<Vec<_>>();
     }
 
+    // Keep the executor's per-call compiler-check and cache invalidation
+    // semantics for internal callers, but never run calls concurrently. The
+    // model-round boundary normally supplies one call; this sequential
+    // fallback also keeps direct/test callers deterministic.
+    if tool_calls.len() > 1 {
+        let mut results = Vec::with_capacity(tool_calls.len());
+        for call in tool_calls {
+            results.extend(
+                Box::pin(execute_tool_batch(
+                    client,
+                    state,
+                    cancel_token,
+                    std::slice::from_ref(call),
+                    approved,
+                    edit_root,
+                    compile_dirty,
+                    compile_cache,
+                    user_wait_duration,
+                    deferred_notice.clone(),
+                ))
+                .await,
+            );
+            if cancel_token.is_cancelled() {
+                break;
+            }
+        }
+        return results;
+    }
+
     dbg_log!("Executing {} tool calls sequentially", tool_calls.len());
     let mut results = Vec::with_capacity(tool_calls.len());
     for call in tool_calls {

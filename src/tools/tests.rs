@@ -30,7 +30,7 @@ fn compressed_core_prompt_preserves_contracts_and_reduces_size() {
         "background",
         "run_command",
         "destructive operations",
-        "Emit exactly one tool call",
+        "Issue exactly one tool call",
         "wait for its result",
         "already applied",
         "advisory loop signals, not a hard stop",

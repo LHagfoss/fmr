@@ -1289,7 +1289,7 @@ If the request context names a skill, load it first. For a likely specialized wo
         }
         crate::config::ToolProtocol::ApiNative => {
             p.push_str(
-                "Tools use the API's native function-calling interface: invoke them directly; do NOT print tool calls as text or JSON. Multiple calls in one response are allowed only for independent reads. Emit a workspace change or command alone and wait for its result. When complete, reply with a plain-text summary and no tool call.\n\n"
+                "Tools use the API's native function-calling interface: invoke them directly; do NOT print tool calls as text or JSON. Issue exactly one tool call per response and wait for its result before choosing the next action. When complete, reply with a plain-text summary and no tool call.\n\n"
             );
         }
     }

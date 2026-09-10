@@ -263,6 +263,22 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
     }
 
     let requested_calls = parsed_tool_calls.len();
+    let omitted_call_count = parsed_tool_calls
+        .len()
+        .saturating_sub(crate::tools::MAX_TOOL_CALLS_PER_RESPONSE);
+    let mut parsed_tool_calls = parsed_tool_calls;
+    if omitted_call_count > 0 {
+        parsed_tool_calls.truncate(crate::tools::MAX_TOOL_CALLS_PER_RESPONSE);
+        crate::logger::operational_event(
+            "tools.batch_truncated",
+            serde_json::json!({
+                "requested": requested_calls,
+                "kept": parsed_tool_calls.len(),
+                "omitted": omitted_call_count,
+                "reason": "absolute_tool_call_ceiling",
+            }),
+        );
+    }
     let validation_errors = crate::tools::validation_errors_by_call(&parsed_tool_calls);
     // Preserve the control-plane priority (for example, load a requested
     // skill before acting), but never execute more than one call from a model
@@ -342,6 +358,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
     ctx.recovery.oversized_batch_rejections = 0;
     let tool_calls = parsed_tool_calls;
     let deferred_call_count = tool_calls.len().saturating_sub(executable_tool_calls.len());
+    let unexecuted_call_count = deferred_call_count.saturating_add(omitted_call_count);
     let read_only_batch = selected_call_index.is_some_and(|index| {
         tool_calls
             .get(index)
@@ -569,7 +586,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
                     "count": results.len(),
                     "requested": requested_calls,
                     "executed": results.len(),
-                    "deferred": deferred_call_count,
+                    "deferred": unexecuted_call_count,
                     "successes": results.iter().filter(|result| result.metadata.success).count(),
                     "failed": results.iter().filter(|result| !result.metadata.success).count(),
                     "changed_paths": results.iter().map(|result| result.metadata.changed_paths.len()).sum::<usize>(),
@@ -611,7 +628,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
             // was actually available and complete. A later turn may recover
             // by re-issuing a bounded read, so this is intentionally scoped
             // to the batch that requested completion.
-            let mut batch_incomplete = deferred_call_count > 0;
+            let mut batch_incomplete = unexecuted_call_count > 0;
             let mut background_pending = false;
             let explicit_verification_user_index = s
                 .history
@@ -1031,7 +1048,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
             for (_, message) in result_messages {
                 s.history.push(message);
             }
-            if deferred_call_count > 0 {
+            if deferred_call_count > 0 || omitted_call_count > 0 {
                 let deferred = tool_calls
                     .iter()
                     .enumerate()
@@ -1047,7 +1064,7 @@ pub(crate) async fn handle_tool_response<P: policy::TurnPolicy + 'static>(
                 s.history.push(ChatMessage::new(
                     "system",
                     format!(
-                        "[The model emitted {requested_calls} tool calls. Only one was executed this round; the remaining calls ({deferred}) were not executed or scheduled. Reissue one at a time after reviewing the real result.]"
+                        "[The model emitted {requested_calls} tool calls. Only one was executed this round; the remaining calls ({deferred}) were not executed or scheduled, and {omitted_call_count} over-limit call(s) were omitted from the transcript. Reissue one at a time after reviewing the real result.]"
                     ),
                 ));
             }
