@@ -119,23 +119,6 @@ pub(crate) fn loaded_skills_since_latest_user(history: &[crate::app::ChatMessage
         .collect()
 }
 
-pub(crate) fn invoked_skills_since_latest_user(history: &[crate::app::ChatMessage]) -> Vec<String> {
-    history
-        .iter()
-        .rev()
-        .take_while(|message| message.role != "user")
-        .flat_map(|message| message.tool_calls.iter())
-        .filter(|call| call.name == "use_skill")
-        .filter_map(|call| serde_json::from_str::<serde_json::Value>(&call.arguments).ok())
-        .filter_map(|arguments| {
-            arguments
-                .get("name")
-                .and_then(|name| name.as_str())
-                .map(str::to_string)
-        })
-        .collect()
-}
-
 fn split_skill_dirs(value: &OsStr) -> Vec<PathBuf> {
     std::env::split_paths(value)
         .filter(|p| !p.as_os_str().is_empty())
@@ -511,24 +494,6 @@ mod tests {
 
         assert_eq!(
             loaded_skills_since_latest_user(&history),
-            vec!["solidtime".to_string()]
-        );
-    }
-
-    #[test]
-    fn invoked_skills_include_calls_even_when_loading_failed() {
-        let call = crate::app::ToolCallRef {
-            id: "call-1".to_string(),
-            name: "use_skill".to_string(),
-            arguments: r#"{"name":"solidtime"}"#.to_string(),
-        };
-        let history = vec![
-            crate::app::ChatMessage::new("user", "use solidtime"),
-            crate::app::ChatMessage::new("assistant", "").with_tool_calls(vec![call]),
-        ];
-
-        assert_eq!(
-            invoked_skills_since_latest_user(&history),
             vec!["solidtime".to_string()]
         );
     }

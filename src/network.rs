@@ -1210,7 +1210,7 @@ pub(crate) async fn prepare_turn_request_with_checkpoint_and_prefix_cache(
             || is_model_directed_note(m)
     });
 
-    let invoked_skills = crate::skills::invoked_skills_since_latest_user(&history_snapshot);
+    let loaded_skills = crate::skills::loaded_skills_since_latest_user(&history_snapshot);
     let skill_hint = if let Some(latest_user_prompt) = history_snapshot
         .iter()
         .rev()
@@ -1220,7 +1220,7 @@ pub(crate) async fn prepare_turn_request_with_checkpoint_and_prefix_cache(
         crate::skills::skill_routing_hint(
             latest_user_prompt,
             skill_metadata.as_slice(),
-            &invoked_skills,
+            &loaded_skills,
         )
     } else {
         None
